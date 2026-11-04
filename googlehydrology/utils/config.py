@@ -558,6 +558,34 @@ class Config(object):
         return self._cfg.get('initial_forget_bias', None)
 
     @property
+    def input_delays(self) -> dict[str, int]:
+        """Real-time delay, in days, of hindcast inputs.
+
+        Maps a hindcast input group name (e.g. ``ERA5_LAND``) or a single
+        hindcast feature name to a number of days ``L``. For a sample issued
+        on date D, those features are set to NaN on the last ``L`` hindcast
+        days (D-L ... D-1), as they would be missing in operations. The
+        masked-mean models then average over the remaining groups on those
+        days. Empty (the default) leaves every input unchanged.
+        """
+        delays = self._cfg.get('input_delays', None) or {}
+        if not isinstance(delays, dict):
+            raise ValueError(
+                '`input_delays` must map input group or feature names to '
+                f'a number of days, got {type(delays)}.'
+            )
+        result = {}
+        for name, days in delays.items():
+            if isinstance(days, bool) or int(days) != days or days < 0:
+                raise ValueError(
+                    f'`input_delays` for {name!r} must be a non-negative '
+                    f'integer number of days, got {days!r}.'
+                )
+            if days > 0:
+                result[str(name)] = int(days)
+        return result
+
+    @property
     def weight_init_opts(self) -> set[WeightInitOpt]:
         res = set(self._as_default_list(self._cfg.get('weight_init_opts', [])))
         bad_keys = res.difference(e.value for e in WeightInitOpt)

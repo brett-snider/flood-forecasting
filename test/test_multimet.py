@@ -1206,3 +1206,126 @@ def test_multimet_rejects_unexpected_minimum_lead_time(
 
     with pytest.raises(ValueError, match='minimum forecast lead time'):
         Multimet(cfg=cfg, is_train=True, period='train')
+
+
+def _delay_config(cfg: Config, **overrides) -> Config:
+    identity_norm = {'centering': 'none', 'scaling': 'none'}
+    settings = {
+        'seq_length': 5,
+        'lead_time': 2,
+        'forecast_overlap': 2,
+        'predict_last_n': 3,
+        'hindcast_inputs': {
+            'ERA5_LAND': ['era5land_2d'],
+            'HRES': ['hres_3d'],
+        },
+        'forecast_inputs': {'HRES': ['hres_3d']},
+        'input_delays': {'ERA5_LAND': 2},
+        'custom_normalization': {
+            'era5land_2d': identity_norm,
+            'hres_3d': identity_norm,
+            'target_v1': identity_norm,
+        },
+        'train_start_date': ['01/01/2000'],
+        'train_end_date': ['02/01/2000'],
+    }
+    settings.update(overrides)
+    cfg.update_config(settings)
+    return cfg
+
+
+def test_multimet_input_delays_blank_last_hindcast_days(
+    tmp_path: Path, get_config
+):
+    """A delayed group is NaN on its last `delay` hindcast days only."""
+    basins = ['basin_01', 'basin_02']
+    dates = pd.date_range('1999-12-20', '2000-01-10', freq='D')
+    lead_times = [np.timedelta64(1, 'D'), np.timedelta64(2, 'D')]
+    ds = _day_offset_dataset(basins, dates, lead_times)
+
+    cfg = get_config('default')
+    _write_multimet_stores(tmp_path / 'stores', cfg, ds, basins)
+    dataset = Multimet(
+        cfg=_delay_config(cfg), is_train=True, period='train'
+    )
+    assert len(dataset) == 4
+
+    # Sample 0: basin_01, issue date D = 2000-01-01 (day offset 12).
+    sample = dataset[0]
+    d = 12.0
+    expected_era5 = np.array(
+        [d - 5, d - 4, d - 3, np.nan, np.nan], dtype=np.float32
+    )[:, None]
+    np.testing.assert_array_equal(
+        sample['x_d_hindcast']['era5land_2d'], expected_era5
+    )
+    # Undelayed inputs keep every day.
+    np.testing.assert_array_equal(
+        sample['x_d_hindcast']['hres_3d'],
+        np.arange(d - 5, d, dtype=np.float32)[:, None],
+    )
+    # The stored data itself is untouched (only the sample is blanked).
+    assert not np.isnan(dataset._dataset['era5land_2d'].values).any()
+
+
+def test_multimet_input_delays_validation_ignores_blanked_days(
+    tmp_path: Path, get_config
+):
+    """Missing data in the blanked days keeps samples; earlier gaps don't."""
+    basins = ['basin_01', 'basin_02']
+    dates = pd.date_range('1999-12-20', '2000-01-10', freq='D')
+    lead_times = [np.timedelta64(1, 'D'), np.timedelta64(2, 'D')]
+    ds = _day_offset_dataset(basins, dates, lead_times)
+    # basin_01: ERA5 missing on 2000-01-01 (D-1 of issue date 2000-01-02,
+    # and day D of issue date 2000-01-01, not in its hindcast).
+    ds['era5land_2d'].loc[{'basin': 'basin_01', 'date': '2000-01-01'}] = np.nan
+    # basin_02: ERA5 missing on 1999-12-28, which issue date 2000-01-01 sees
+    # (D-4) and issue date 2000-01-02 also sees (D-5).
+    ds['era5land_2d'].loc[{'basin': 'basin_02', 'date': '1999-12-28'}] = np.nan
+
+    cfg = get_config('default')
+    _write_multimet_stores(tmp_path / 'stores', cfg, ds, basins)
+
+    # Without the delay the gap in basin_01 rejects issue date 2000-01-02.
+    no_delay = Multimet(
+        cfg=_delay_config(cfg, input_delays={}), is_train=True, period='train'
+    )
+    assert len(no_delay) == 1
+
+    delayed = Multimet(
+        cfg=_delay_config(cfg), is_train=True, period='train'
+    )
+    basins_kept = [
+        int(delayed._sample_index[i]['basin']) for i in range(len(delayed))
+    ]
+    assert basins_kept == [0, 0]
+    for i in range(len(delayed)):
+        era5 = delayed[i]['x_d_hindcast']['era5land_2d']
+        assert not np.isnan(era5[:-2]).any()
+        assert np.isnan(era5[-2:]).all()
+
+
+@pytest.mark.parametrize(
+    'input_delays, match',
+    [
+        ({'NOT_A_GROUP': 2}, 'neither a hindcast input group'),
+        ({'HRES': 1}, 'also forecast inputs'),
+        ({'era5land_2d': 5}, 'shorter than seq_length'),
+        ({'ERA5_LAND': -1}, 'non-negative integer'),
+    ],
+)
+def test_multimet_input_delays_errors(
+    tmp_path: Path, get_config, input_delays, match
+):
+    basins = ['basin_01', 'basin_02']
+    dates = pd.date_range('1999-12-20', '2000-01-10', freq='D')
+    lead_times = [np.timedelta64(1, 'D'), np.timedelta64(2, 'D')]
+    ds = _day_offset_dataset(basins, dates, lead_times)
+    cfg = get_config('default')
+    _write_multimet_stores(tmp_path / 'stores', cfg, ds, basins)
+    with pytest.raises(ValueError, match=match):
+        Multimet(
+            cfg=_delay_config(cfg, input_delays=input_delays),
+            is_train=True,
+            period='train',
+        )

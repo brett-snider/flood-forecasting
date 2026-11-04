@@ -46,6 +46,7 @@ from googlehydrology.utils.configutils import (
     PRODUCT_ALIASES,
     canonical_product_name as _canonical_product_name,
     flatten_feature_list,
+    group_features_list,
     normalize_product_key as _normalize_product_key,
     product_name_from_feature as _product_name_from_feature,
 )
@@ -187,6 +188,22 @@ class Multimet(Dataset):
         self._forecast_inputs = cfg.forecast_inputs
         self._union_mapping = cfg.union_mapping
 
+        # Real-time delays of hindcast inputs: feature name -> days. These
+        # features are blanked (NaN) on the last `days` hindcast steps of
+        # every sample, see `_apply_input_delays`.
+        self._input_delays = _resolve_input_delays(
+            cfg.input_delays,
+            hindcast_inputs=cfg.hindcast_inputs,
+            forecast_features=self._forecast_features,
+            seq_length=self._seq_length,
+        )
+        self._max_input_delay = max(self._input_delays.values(), default=0)
+        if self._input_delays:
+            LOGGER.info(
+                'Input delays (days, blanked at the end of each hindcast): %s',
+                self._input_delays,
+            )
+
         # Feature data paths by type. This allows the option to load some data from cloud and some locally.
         self._statics_data_path = cfg.statics_data_dir
         self._dynamics_data_path = cfg.dynamics_data_dir
@@ -281,8 +298,11 @@ class Multimet(Dataset):
         # the dataset for sampling, we keep all the hindcast and forecast sequence
         # data on both sides of the period dates. This would be more memory efficient
         # in `_load_data()` but that approach adds complexity to the child classes.
+        # Delayed inputs are validated on a window shifted back by their delay
+        # (see `_create_valid_sample_mask`), so keep that many extra days.
         extended_start_dates = [
-            start_date - pd.Timedelta(days=self._seq_length)
+            start_date
+            - pd.Timedelta(days=self._seq_length + self._max_input_delay)
             for start_date in start_dates
         ]
         extended_end_dates = [
@@ -512,6 +532,8 @@ class Multimet(Dataset):
             dim_indexes_with_lead_time,
         )
 
+        features = self._apply_input_delays(features)
+
         return {
             name: np.expand_dims(feature, -1)
             for name, feature in features.items()
@@ -519,6 +541,27 @@ class Multimet(Dataset):
         # TODO (future) :: This adds a dimension to many features, as required by some models.
         # There is no need for this except that it is how basedataset works, and everything else expects
         # the trailing dim. Remove this dependency in the future.
+
+    def _apply_input_delays(
+        self, features: dict[str, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        """Set delayed hindcast features to NaN on their last `delay` days.
+
+        Mimics operations, where e.g. ERA5-Land for the most recent days is
+        not yet published when a forecast is issued. The values stay on their
+        true dates; they are only absent where they would be absent in real
+        time.
+        """
+        for name, delay in self._input_delays.items():
+            values = features[name]
+            blank = np.full((delay, *values.shape[1:]), np.nan, values.dtype)
+            if isinstance(values, dask.array.Array):
+                features[name] = dask.array.concatenate(
+                    [values[:-delay], blank], axis=0
+                )
+            else:
+                features[name] = np.concatenate([values[:-delay], blank], 0)
+        return features
 
     def _extract_forecasts(
         self, sample_index: dict[str, int]
@@ -615,10 +658,25 @@ class Multimet(Dataset):
         Allows index-based sample retrieval, faster than coordinate-based sample
         retrieval.
         """
+        # Delayed inputs are blanked on their last `delay` hindcast days, so
+        # their values there are never used: check the days the model does
+        # see. Moving each delayed feature `delay` days later makes the usual
+        # hindcast window check cover D-seq_length-delay ... D-1-delay.
+        # Missing (or not yet published) data in the blanked days then does
+        # not reject a sample.
+        validation_dataset = self._dataset
+        if self._input_delays:
+            validation_dataset = self._dataset.assign(
+                {
+                    name: self._dataset[name].shift(date=delay)
+                    for name, delay in self._input_delays.items()
+                }
+            )
+
         # Create a boolean mask for the original dataset noting valid (True) vs. invalid (False) samples.
         valid_sample_mask = validate_samples(
             is_train=self.is_train,
-            dataset=self._dataset,
+            dataset=validation_dataset,
             nan_handling_method=self._nan_handling_method,
             sample_dates=self._sample_dates,
             lead_time=self.lead_time,
@@ -986,6 +1044,61 @@ def _extract_dataarray(
     # Convert range(0, n) to [0, 1, ..., n-1] as arrays don't support range.
     locs = (list(loc) if isinstance(loc, range) else loc for loc in locs)
     return data.data[tuple(locs)]
+
+
+def _resolve_input_delays(
+    input_delays: dict[str, int],
+    *,
+    hindcast_inputs: dict[str, list[str]] | list,
+    forecast_features: list[str],
+    seq_length: int,
+) -> dict[str, int]:
+    """Map `input_delays` config keys to hindcast feature names.
+
+    A key is either a hindcast input group (matched like product folder
+    names, e.g. ``ERA5_LAND``, ``era5land`` or ``era5_land``) or a single
+    hindcast feature name. A feature key overrides its group's delay.
+    """
+    if not input_delays:
+        return {}
+
+    groups = group_features_list(hindcast_inputs)
+    hindcast_features = flatten_feature_list(hindcast_inputs)
+    groups_by_key = {}
+    for group_name, features in groups.items():
+        groups_by_key[_normalize_product_key(group_name)] = features
+        groups_by_key[
+            _normalize_product_key(_canonical_product_name(group_name))
+        ] = features
+
+    group_delays, feature_delays = {}, {}
+    for key, delay in input_delays.items():
+        if key in hindcast_features:
+            feature_delays[key] = delay
+        elif _normalize_product_key(key) in groups_by_key:
+            for feature in groups_by_key[_normalize_product_key(key)]:
+                group_delays[feature] = delay
+        else:
+            raise ValueError(
+                f'`input_delays` key {key!r} is neither a hindcast input group '
+                f'({list(groups)}) nor a hindcast feature.'
+            )
+
+    delays = group_delays | feature_delays
+    shared = sorted(set(delays) & set(forecast_features))
+    if shared:
+        raise ValueError(
+            f'`input_delays` cannot be applied to {shared}: they are also '
+            'forecast inputs, and the model reads shared groups from the '
+            'forecast data, not the hindcast data.'
+        )
+    too_long = {k: v for k, v in delays.items() if v >= seq_length}
+    if too_long:
+        raise ValueError(
+            f'`input_delays` {too_long} must be shorter than seq_length '
+            f'({seq_length}).'
+        )
+    return delays
 
 
 def _assert_floats_are_float32(dataset: xr.Dataset):
