@@ -219,7 +219,9 @@ class BaseTrainer(object):
             self._freeze_model_parts()
 
         self.optimizer = self._get_optimizer()
-        self.scaler = GradScaler(enabled=self.device.type == 'cuda')
+        self.scaler = GradScaler(
+            enabled=self.device.type == 'cuda' and self.cfg.mixed_precision
+        )
         self.loss_obj = self._get_loss_obj().to(self.device)
 
         # Add possible regularization terms to the loss function.
@@ -448,7 +450,8 @@ class BaseTrainer(object):
                     data[key] = data[key].to(self.device)
 
             with autocast(
-                self.device.type, enabled=(self.device.type == 'cuda')
+                self.device.type,
+                enabled=(self.device.type == 'cuda' and self.cfg.mixed_precision),
             ):
                 # apply possible pre-processing to the batch before the forward pass
                 data = self.model.pre_model_hook(data, is_train=True)

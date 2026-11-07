@@ -135,6 +135,7 @@ def test_head_regression():
 def test_head_cmal():
     cfg = MagicMock()
     cfg.head = 'cmal'
+    cfg.cmal_min_scale = 1e-5
     # n_out for CMAL should match n_targets * 4 * n_distributions
     head = get_head(cfg=cfg, n_in=32, n_out=12, n_hidden=50)
 
@@ -147,6 +148,19 @@ def test_head_cmal():
 
     assert torch.all(out['b'] > 0)
     assert torch.all((out['tau'] > 0) & (out['tau'] < 1))
+
+
+@pytest.mark.unit
+def test_head_cmal_min_scale():
+    cfg = MagicMock()
+    cfg.head = 'cmal'
+    cfg.cmal_min_scale = 1e-3
+    head = get_head(cfg=cfg, n_in=8, n_out=12, n_hidden=16)
+    with torch.no_grad():
+        head.fc2.weight[3:6] = 0.0
+        head.fc2.bias[3:6] = -50.0  # push the width outputs far below zero
+    out = head(torch.randn(4, 8))
+    assert torch.all(out['b'] >= 1e-3)
 
 
 @pytest.mark.unit

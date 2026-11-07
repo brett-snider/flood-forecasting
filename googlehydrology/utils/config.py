@@ -383,6 +383,20 @@ class Config(object):
                 raise ValueError(f'Invalid logging_level: {level}')
 
     @property
+    def cmal_min_scale(self) -> float:
+        """Smallest spread (width) a CMAL component may have, in scaled target
+        units. Higher values stop the model from becoming overconfident.
+        Default 1e-5 keeps the original behaviour."""
+        return float(self._cfg.get('cmal_min_scale', 1e-5))
+
+    @property
+    def mixed_precision(self) -> bool:
+        """Use half-precision (float16) arithmetic on GPU. Faster, but numbers
+        above ~65,000 overflow. False trains in full precision (float32).
+        Default True keeps the original behaviour."""
+        return bool(self._cfg.get('mixed_precision', True))
+
+    @property
     def allow_subsequent_nan_losses(self) -> int:
         return self._cfg.get('allow_subsequent_nan_losses', 0)
 

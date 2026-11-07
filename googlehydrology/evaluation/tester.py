@@ -793,7 +793,10 @@ class BaseTester(object):
                             data[key] = data[key].to(self.device)
 
                     with autocast(
-                        self.device.type, enabled=(self.device.type == 'cuda')
+                        self.device.type,
+                        enabled=(
+                            self.device.type == 'cuda' and self.cfg.mixed_precision
+                        ),
                     ):
                         data = model.pre_model_hook(data, is_train=False)
                         predictions, loss = self._get_predictions_and_loss(

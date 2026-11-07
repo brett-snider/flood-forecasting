@@ -53,6 +53,7 @@ def get_head(
             n_out=n_out,
             n_hidden=n_hidden,
             n_distributions=cfg.n_distributions,
+            min_scale=cfg.cmal_min_scale,
         )
     elif cfg.head.lower() == '':
         raise ValueError(
@@ -180,6 +181,7 @@ class CMAL(BaseHead):
         n_out: int,
         n_hidden: int = 100,
         n_distributions: int | None = None,
+        min_scale: float = 1e-5,
     ):
         """Create the two-layer CMAL head; see the class docstring."""
         super(CMAL, self).__init__()
@@ -189,6 +191,7 @@ class CMAL(BaseHead):
 
         self._softplus = torch.nn.Softplus(2)
         self._eps = 1e-5
+        self._min_scale = min_scale
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         """Perform a CMAL head forward pass.
@@ -212,7 +215,7 @@ class CMAL(BaseHead):
         # enforce properties on component parameters and weights:
         m = m_latent  # no restrictions (depending on setting m>0 might be useful)
         b = (
-            self._softplus(b_latent) + self._eps
+            self._softplus(b_latent) + self._min_scale
         )  # scale > 0 (softplus was working good in tests)
         t = (1 - self._eps) * torch.sigmoid(t_latent) + self._eps  # 0 > tau > 1
         p = (1 - self._eps) * torch.softmax(
