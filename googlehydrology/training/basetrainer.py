@@ -288,6 +288,20 @@ class BaseTrainer(object):
 
                 def lr_step(loss: float):
                     lr_scheduler.step()
+            case 'MultiStepLR':
+                # Step down by a factor at the listed epochs, e.g.
+                # learning_rate_epochs_drop: [20, 30] with drop factor 0.5.
+                milestones = self.cfg.learning_rate_epochs_drop
+                if isinstance(milestones, int):
+                    milestones = [milestones]
+                lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                    self.optimizer,
+                    milestones=sorted(int(m) for m in milestones),
+                    gamma=self.cfg.learning_rate_drop_factor,
+                )
+
+                def lr_step(loss: float):
+                    lr_scheduler.step()
             case 'ReduceLROnPlateau':
                 # Step down by a factor every epoc w.r.t. to change in loss between patience epocs.
                 lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(

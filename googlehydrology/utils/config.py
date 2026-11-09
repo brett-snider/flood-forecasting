@@ -645,7 +645,9 @@ class Config(object):
         return self._cfg.get('learning_rate_drop_factor', 0.1)
 
     @property
-    def learning_rate_epochs_drop(self) -> int:
+    def learning_rate_epochs_drop(self) -> int | list[int]:
+        """Epochs between drops (StepLR), patience (ReduceLROnPlateau), or the
+        list of epochs at which to drop (MultiStepLR)."""
         return self._cfg.get('learning_rate_epochs_drop', 0)
 
     @property
