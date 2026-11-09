@@ -529,6 +529,46 @@ def test_forecast_dataset_nan_handling_method_error(
         Multimet(cfg=cfg_nan_handling_unioning, is_train=True, period='train')
 
 
+def test_forecast_dataset_masked_mean_groups_per_product(get_config):
+    """Inputs given per product make one feature group per product, and masked_mean is accepted."""
+    cfg = get_config('default')
+    cfg.update_config(
+        {
+            'hindcast_inputs': {
+                'CASR': ['casr_pr', 'casr_tas'],
+                'ERA5_LAND': ['era5land_tp'],
+                'GFSFC': ['gfsfc_pr'],
+            },
+            'forecast_inputs': {'GFSFC': ['gfsfc_pr'], 'AIFS': ['aifs_pr']},
+            'nan_handling_method': 'masked_mean',
+        }
+    )
+    captured = {}
+    original = Multimet.__init__
+
+    def spy(self, *args, **kwargs):
+        try:
+            original(self, *args, **kwargs)
+        finally:
+            captured['groups'] = getattr(self, '_feature_groups', None)
+
+    # Stop right after the groups are built (the rest needs real data).
+    with patch.object(Multimet, '__init__', spy), patch(
+        'googlehydrology.datasetzoo.multimet.Scaler',
+        side_effect=RuntimeError('stop'),
+    ), patch.object(Multimet, '_load_data'), patch(
+        'googlehydrology.datasetzoo.multimet.load_basin_file'
+    ):
+        with pytest.raises(RuntimeError, match='stop'):
+            Multimet(cfg=cfg, is_train=True, period='train')
+    assert captured['groups'] == [
+        ['casr_pr', 'casr_tas'],
+        ['era5land_tp'],
+        ['gfsfc_pr'],
+        ['aifs_pr'],
+    ]
+
+
 @patch('googlehydrology.datasetzoo.multimet.load_basin_file')
 @patch.object(Multimet, '_load_data')
 def test_forecast_dataset_per_basin_target_stds(

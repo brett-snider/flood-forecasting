@@ -1335,3 +1335,66 @@ def test_validate_samples_windows_account_for_min_lead_time():
         list(range(2, 11)),
     )
 
+
+
+# --- Per-product groups (masked_mean) ---
+
+
+def _two_product_dataset():
+    dates = pd.date_range('2020-01-01', periods=20)
+    names = ['casr_pr', 'casr_tas', 'era5land_tp', 'era5land_t2m', 'streamflow']
+    ds = xr.Dataset(
+        {n: (('basin', 'date'), np.ones((1, 20))) for n in names},
+        coords={'basin': ['G1'], 'date': dates},
+    )
+    ds['era5land_tp'][0, 9] = np.nan  # ERA5 missing on day 10
+    return ds, dates
+
+
+@pytest.mark.parametrize(
+    'method, rejected_days',
+    [
+        (None, [1, 2, 3, 4, 10, 11, 12, 13, 14]),
+        ('input_replacing', [1, 2, 3, 4]),
+        ('masked_mean', [1, 2, 3, 4]),
+    ],
+)
+def test_validate_samples_masked_mean_uses_product_groups(method, rejected_days):
+    """A day with one product missing is kept by masked_mean (another product is complete)."""
+    ds, dates = _two_product_dataset()
+    hind = ['casr_pr', 'casr_tas', 'era5land_tp', 'era5land_t2m']
+    groups = [['casr_pr', 'casr_tas'], ['era5land_tp', 'era5land_t2m']]
+    mask, _ = validate_samples(
+        is_train=True,
+        dataset=ds,
+        sample_dates=dates,
+        nan_handling_method=method,
+        feature_groups=groups,
+        seq_length=5,
+        predict_last_n=1,
+        hindcast_features=hind,
+        target_features=['streamflow'],
+    )
+    got = [d.day for d, ok in zip(dates, mask.values[0]) if not ok]
+    assert got == rejected_days
+
+
+def test_validate_samples_masked_mean_rejects_day_with_no_complete_product():
+    """If every product is incomplete on a day, masked_mean still rejects it."""
+    ds, dates = _two_product_dataset()
+    ds['casr_tas'][0, 9] = np.nan  # now both products incomplete on day 10
+    hind = ['casr_pr', 'casr_tas', 'era5land_tp', 'era5land_t2m']
+    groups = [['casr_pr', 'casr_tas'], ['era5land_tp', 'era5land_t2m']]
+    mask, _ = validate_samples(
+        is_train=True,
+        dataset=ds,
+        sample_dates=dates,
+        nan_handling_method='masked_mean',
+        feature_groups=groups,
+        seq_length=5,
+        predict_last_n=1,
+        hindcast_features=hind,
+        target_features=['streamflow'],
+    )
+    got = [d.day for d, ok in zip(dates, mask.values[0]) if not ok]
+    assert got == [1, 2, 3, 4, 10, 11, 12, 13, 14]

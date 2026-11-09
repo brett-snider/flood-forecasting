@@ -27,6 +27,24 @@ def _skip_all_zero_samples(dataset: xr.Dataset) -> xr.DataArray:
     return mask
 
 
+def _groups_within(
+    features: list[str], feature_groups: list[list[str]]
+) -> list[list[str]]:
+    """The feature groups, limited to `features` (e.g. only the hindcast ones).
+
+    Features not in any group form one extra group. With no usable groups, all
+    features form a single group (the old behaviour).
+    """
+    wanted = list(features)
+    groups = [[f for f in g if f in wanted] for g in (feature_groups or [])]
+    groups = [g for g in groups if g]
+    grouped = {f for g in groups for f in g}
+    leftover = [f for f in wanted if f not in grouped]
+    if leftover:
+        groups.append(leftover)
+    return groups or [wanted]
+
+
 def validate_samples(
     is_train: bool,
     dataset: xr.Dataset,
@@ -128,7 +146,7 @@ def validate_samples(
         mask = validate_samples_for_nan_handling(
             dataset=dataset[hindcast_features],
             nan_handling_method=nan_handling_method,
-            feature_groups=[hindcast_features],
+            feature_groups=_groups_within(hindcast_features, feature_groups),
         )
 
         masks.append(
@@ -146,7 +164,7 @@ def validate_samples(
             validate_samples_for_nan_handling(
                 dataset=dataset[forecast_features],
                 nan_handling_method=nan_handling_method,
-                feature_groups=[forecast_features],
+                feature_groups=_groups_within(forecast_features, feature_groups),
             ).rename('forecasts')
         )
 
@@ -163,7 +181,7 @@ def validate_samples(
                 .squeeze()
                 .drop_vars('lead_time'),
                 nan_handling_method=nan_handling_method,
-                feature_groups=[forecast_features],
+                feature_groups=_groups_within(forecast_features, feature_groups),
             )
 
             masks.append(

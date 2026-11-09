@@ -135,6 +135,17 @@ class MultimetDataLoader(torch.utils.data.DataLoader):
         return len(self.batch_sampler)
 
 
+def _is_grouped(inputs) -> bool:
+    """True if model inputs are given per product (a dict or a list of lists)."""
+    if isinstance(inputs, dict):
+        return len(inputs) > 0
+    return (
+        isinstance(inputs, list)
+        and len(inputs) > 0
+        and all(isinstance(e, list) for e in inputs)
+    )
+
+
 class Multimet(Dataset):
     """Base data set class for forecast models.
 
@@ -211,13 +222,27 @@ class Multimet(Dataset):
 
         # NaN-handling options are required to apply the correct sample validation algorithms.
         self._nan_handling_method = cfg.nan_handling_method
-        self._feature_groups = [
-            self._hindcast_features,
-            self._forecast_features,
+        # One group per product (e.g. CASR, ERA5_LAND, IMERG), taken from the
+        # config before it is flattened, so group-based NaN handling
+        # (masked_mean, attention, unioning) can check each product separately.
+        # This matches the model, which embeds each product on its own and
+        # leaves a product out of the mean on days it is missing.
+        hindcast_groups = (
+            list(group_features_list(cfg.hindcast_inputs).values())
+            if _is_grouped(cfg.hindcast_inputs)
+            else []
+        )
+        forecast_groups = (
+            list(group_features_list(cfg.forecast_inputs).values())
+            if _is_grouped(cfg.forecast_inputs)
+            else []
+        )
+        self._feature_groups = hindcast_groups + [
+            g for g in forecast_groups if g not in hindcast_groups
         ]
         if (
-            isinstance(self._hindcast_features[0], str)
-            or isinstance(self._forecast_features[0], str)
+            not _is_grouped(cfg.hindcast_inputs)
+            or (cfg.forecast_inputs and not _is_grouped(cfg.forecast_inputs))
         ) and self._nan_handling_method in [
             'masked_mean',
             'attention',
