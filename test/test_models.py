@@ -164,6 +164,39 @@ def test_head_cmal_min_scale():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize('bias', [50.0, -50.0])
+def test_head_cmal_tau_stays_inside_0_1(bias):
+    """tau must never reach exactly 0 or 1: the loss takes log(tau) and log(1 - tau)."""
+    cfg = MagicMock()
+    cfg.head = 'cmal'
+    cfg.cmal_min_scale = 1e-3
+    head = get_head(cfg=cfg, n_in=8, n_out=12, n_hidden=16)
+    with torch.no_grad():
+        head.fc2.weight[6:9] = 0.0
+        head.fc2.bias[6:9] = bias  # push the lean far to one side
+    out = head(torch.randn(4, 8))
+    t = out['tau']
+    assert t.dtype == torch.float32
+    assert torch.all(t < 1) and torch.all(t > 0)
+    assert torch.isfinite(torch.log(t) + torch.log(1 - t)).all()
+
+
+@pytest.mark.unit
+def test_head_cmal_outputs_float32_under_half_precision_input():
+    """Distribution parameters come out in float32 even if the layers ran in float16."""
+    cfg = MagicMock()
+    cfg.head = 'cmal'
+    cfg.cmal_min_scale = 1e-3
+    head = get_head(cfg=cfg, n_in=8, n_out=12, n_hidden=16).half()
+    with torch.no_grad():
+        head.fc2.weight[6:9] = 0.0
+        head.fc2.bias[6:9] = 20.0  # sigmoid(20) is exactly 1 in float16
+    out = head(torch.randn(4, 8).half())
+    assert all(v.dtype == torch.float32 for v in out.values())
+    assert torch.all(out['tau'] < 1)
+
+
+@pytest.mark.unit
 def test_head_invalid_type():
     cfg_empty = MagicMock(head='', model='lstm')
     with pytest.raises(ValueError, match="No 'head' specified"):
@@ -251,3 +284,24 @@ def test_load_weights_torch_compile_compatibility(
     trainer.model = train_model
     trainer._load_model_weights(weight_path)
 
+
+
+@pytest.mark.unit
+def test_cmal_loss_finite_when_lean_is_extreme():
+    """The CMAL loss and its gradients stay finite when the head pushes tau to the edge."""
+
+    cfg = MagicMock()
+    cfg.head = 'cmal'
+    cfg.cmal_min_scale = 1e-3
+    head = get_head(cfg=cfg, n_in=8, n_out=12, n_hidden=16)
+    with torch.no_grad():
+        head.fc2.weight[6:9] = 0.0
+        head.fc2.bias[6:9] = 40.0  # tau would be exactly 1 with the old formula
+    x = torch.randn(5, 7, 8, requires_grad=True)
+    out = head(x)
+    # log density of one asymmetric Laplace, as in the loss: log t + log(1-t) - log b - ...
+    t, b = out['tau'], out['b']
+    logp = torch.log(t) + torch.log(1 - t) - torch.log(b)
+    logp.sum().backward()
+    assert torch.isfinite(logp).all()
+    assert all(torch.isfinite(p.grad).all() for p in head.parameters() if p.grad is not None)

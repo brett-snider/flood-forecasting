@@ -501,6 +501,7 @@ class BaseTrainer(object):
 
                 # get gradients
                 self.scaler.scale(loss).backward()
+                gradient_norm = None
 
                 if self.cfg.clip_gradient_norm is not None:
                     self.scaler.unscale_(self.optimizer)
@@ -511,8 +512,15 @@ class BaseTrainer(object):
                     # an extra GPU synchronization on every training step.
                     gradient_norms.append(gradient_norm.detach())
 
-                # update weights
-                self.scaler.step(self.optimizer)
+                # update weights. With mixed precision the scaler skips steps
+                # whose gradients are not finite; without it, do the same here,
+                # since one such step would turn every weight into NaN.
+                if self.scaler.is_enabled() or gradient_norm is None or bool(
+                    torch.isfinite(gradient_norm)
+                ):
+                    self.scaler.step(self.optimizer)
+                else:
+                    self.optimizer.zero_grad()
 
                 self.scaler.update()  # Update scale for the next iteration
 

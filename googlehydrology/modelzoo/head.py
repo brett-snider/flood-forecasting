@@ -208,7 +208,9 @@ class CMAL(BaseHead):
             the key 'b' the scale parameters, the key 'tau' the skewness parameters, and the key 'pi' the weights).
         """
         h = torch.relu(self.fc1(x))
-        h = self.fc2(h)
+        # Distribution parameters in full precision, even under mixed precision:
+        # in float16, sigmoid() rounds to exactly 1 for inputs above ~8.
+        h = self.fc2(h).float()
 
         m_latent, b_latent, t_latent, p_latent = h.chunk(4, dim=-1)
 
@@ -217,7 +219,10 @@ class CMAL(BaseHead):
         b = (
             self._softplus(b_latent) + self._min_scale
         )  # scale > 0 (softplus was working good in tests)
-        t = (1 - self._eps) * torch.sigmoid(t_latent) + self._eps  # 0 > tau > 1
+        # eps <= tau <= 1 - eps. The old form, (1 - eps) * sigmoid + eps, reaches
+        # exactly 1 once sigmoid rounds to 1 (float32: input above ~17), and the
+        # loss then takes log(1 - tau) = log(0) = -inf -> non-finite gradients.
+        t = (1 - 2 * self._eps) * torch.sigmoid(t_latent) + self._eps
         p = (1 - self._eps) * torch.softmax(
             p_latent, dim=-1
         ) + self._eps  # sum(pi) = 1 & pi > 0
